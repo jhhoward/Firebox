@@ -11,10 +11,11 @@ constexpr int particleMaxX = displayWidth << particleShift;
 constexpr int particleMaxY = displayHeight << particleShift;
 constexpr uint8_t maxFireValue = 4;
 constexpr int numDitherValues = 5;
-constexpr int maxParticles = 8;
+constexpr int maxParticles = 16;
 constexpr int gravity = 1;
 constexpr int maxGravity = 8;
-constexpr int numParticleTypes = 9;
+constexpr int numParticleTypes = 10;
+constexpr int firstPreviewParticle = 2;
 
 uint8_t pixels[displayWidth * displayHeight];
 int16_t previewX = displayWidth / 2;
@@ -24,6 +25,8 @@ struct ParticleType
 	const unsigned char* imageData;
 	uint8_t startingFuel;
 	uint8_t startingResistance;
+	uint8_t explosionSize;
+	uint8_t explosionType;
 	
 	const unsigned char* getImageData()
 	{
@@ -37,10 +40,31 @@ struct ParticleType
 	{
 		return pgm_read_byte(&startingResistance);
 	}
+	
+	uint8_t getExplosionSize()
+	{
+		return pgm_read_byte(&explosionSize);
+	}
+	uint8_t getExplosionType()
+	{
+		return pgm_read_byte(&explosionType);
+	}
 };
 
 const ParticleType particleTypes[numParticleTypes] PROGMEM =
 {
+	{
+		fireballImageData,
+		25,		// Fuel
+		0,		// Resistance
+	},
+	{
+		fireballImageData,
+		25,		// Fuel
+		0,		// Resistance
+		3,		// Explosion size
+		0,		// Explosion type
+	},
 	{
 		logImageData,
 		255,	// Fuel
@@ -54,37 +78,40 @@ const ParticleType particleTypes[numParticleTypes] PROGMEM =
 	{
 		arduboyImageData,
 		50,		// Fuel
-		4,		// Resistance
+		40,		// Resistance
+		4,		// Explosion size
+		0,		// Explosion type
 	},
 	{
 		faceImageData,
 		50,		// Fuel
-		4,		// Resistance
+		1,		// Resistance
 	},
 	{
 		batteryImageData,
-		50,		// Fuel
-		4,		// Resistance
+		5,		// Fuel
+		40,		// Resistance
+		3,		// Explosion size
+		1,		// Explosion type
 	},
 	{
 		mouseImageData,
-		50,		// Fuel
-		4,		// Resistance
+		20,		// Fuel
+		10,		// Resistance
+		3,		// Explosion size
+		0,		// Explosion type
 	},
 	{
 		glassesImageData,
-		50,		// Fuel
-		4,		// Resistance
+		10,		// Fuel
+		20,		// Resistance
 	},
 	{
 		bombImageData,
 		50,		// Fuel
 		4,		// Resistance
-	},
-	{
-		fireballImageData,
-		50,		// Fuel
-		0,		// Resistance
+		5,		// Explosion size
+		1,		// Explosion type
 	},
 	
 };
@@ -188,6 +215,20 @@ const uint8_t ditherPatterns[] PROGMEM =
 	
 };
 
+uint8_t buttonsState = 0;
+uint8_t lastButtonsState = 0;
+
+inline bool justPressed(uint8_t buttonMask)
+{
+	return ((buttonsState & buttonMask) == buttonMask
+	&& (lastButtonsState & buttonMask) == 0);
+}
+
+inline bool isPressed(uint8_t buttonMask)
+{
+	return (buttonsState & buttonMask) == buttonMask;
+}
+
 void setup() 
 {
 	arduboy.boot();
@@ -197,6 +238,8 @@ void setup()
 	{
 		p.fuel = 0;
 	}
+	
+	previewParticle.type = firstPreviewParticle;
 }
 
 inline uint16_t generateRandomNumber()
@@ -209,7 +252,7 @@ inline uint16_t generateRandomNumber()
 	return xs;
 }
 
-void spawnParticle(uint8_t type, int16_t x, int16_t y)
+Particle* spawnParticle(uint8_t type, int16_t x, int16_t y)
 {
 	for(Particle& p : particles)
 	{
@@ -221,8 +264,23 @@ void spawnParticle(uint8_t type, int16_t x, int16_t y)
 			p.oldY = p.y = y;
 			p.fuel = particleType.fuel();
 			p.resistance = particleType.resistance();
-			return;
+			return &p;
 		}
+	}
+	return nullptr;
+}
+
+void explode(uint8_t type, uint8_t count, int16_t x, int16_t y)
+{
+	for(uint8_t n = 0; n < count; n++)
+	{
+		Particle* p = spawnParticle(type, x, y);
+		if(p)
+		{
+			p->oldX += (generateRandomNumber() & 31) - 16;
+			p->oldY += (generateRandomNumber() & 15);
+		}
+		else return;
 	}
 }
 
@@ -243,6 +301,8 @@ void spreadFire(int src)
 
 inline void paintDisplay()
 {
+	uint32_t total = 0;
+	
 	for(int y = 0; y < displayHeight; y += 4)
 	{
 		int index = (y * displayWidth);
@@ -274,8 +334,18 @@ inline void paintDisplay()
 			
 			arduboy.paint8Pixels(output);
 			index++;
+			
+			total += output;
 		}
 	}
+	
+	static bool flicker = false;
+	uint8_t overallFireStrength = (uint8_t) (total / 512);
+	flicker = !flicker;
+	if(flicker)
+		arduboy.setRGBled(overallFireStrength / 2, 0, 0);
+	else
+		arduboy.setRGBled(overallFireStrength, 0, 0);
 }
 
 inline void clearParticles()
@@ -311,6 +381,9 @@ inline void clearParticles()
 
 inline void moveParticles()
 {
+	static uint8_t counter = 0;
+	counter++;
+	
 	for(Particle& p : particles)
 	{
 		if(p.fuel > 0)
@@ -324,10 +397,14 @@ inline void moveParticles()
 			{
 				velY += gravity;
 			}
-			if(velX < 0)
-				velX ++;
-			if(velX > 0)
-				velX--;
+			
+			if((counter & 7) == 0)
+			{
+				if(velX < 0)
+					velX ++;
+				if(velX > 0)
+					velX--;
+			}
 			
 			p.x += velX;
 			p.y += velY;
@@ -461,15 +538,25 @@ inline void drawLitParticles()
 
 inline void animateFire()
 {
-	for(int x = 0; x < displayWidth; x++)
+	if(isPressed(A_BUTTON))
 	{
-		int dist = (displayWidth / 2) - x;
-		if(dist < 0) 
-			dist = -dist;
-		int strength = maxFireValue - dist;
-		if(strength < 0)
-			strength = 0;
-		pixels[(displayHeight - 1) * displayWidth + x] = (uint8_t) strength;
+		for(int x = 0; x < displayWidth; x++)
+		{
+			pixels[(displayHeight - 1) * displayWidth + x] = maxFireValue;
+		}
+	}
+	else
+	{
+		for(int x = 0; x < displayWidth; x++)
+		{
+			int dist = (displayWidth / 2) - x;
+			if(dist < 0) 
+				dist = -dist;
+			int strength = maxFireValue - dist;
+			if(strength < 0)
+				strength = 0;
+			pixels[(displayHeight - 1) * displayWidth + x] = (uint8_t) strength;
+		}
 	}
 
 	for(int x = 0; x < displayWidth; x++)
@@ -588,23 +675,16 @@ inline void drawParticles()
 			if(p.resistance == 0)
 			{
 				p.fuel--;
+				if(p.fuel == 0)
+				{
+					if(p.type)
+					{
+						explode(p.particleType().getExplosionType(), p.particleType().getExplosionSize(), p.x + p.width() / 2, p.y + p.height() / 2);
+					}
+				}
 			}
 		}
 	}
-}
-
-uint8_t buttonsState = 0;
-uint8_t lastButtonsState = 0;
-
-inline bool justPressed(uint8_t buttonMask)
-{
-	return ((buttonsState & buttonMask) == buttonMask
-	&& (lastButtonsState & buttonMask) == 0);
-}
-
-inline bool isPressed(uint8_t buttonMask)
-{
-	return (buttonsState & buttonMask) == buttonMask;
 }
 
 inline void updateInput()
@@ -617,7 +697,12 @@ inline void updateInput()
 		spawnParticle(previewParticle.type, previewX, 0);
 	}
 	
-	if(justPressed(A_BUTTON))
+	/*if(justPressed(A_BUTTON))
+	{
+		explode(1, 3, particleMaxX / 2, particleMaxY / 2);
+	}*/
+	
+	/*if(justPressed(A_BUTTON))
 	{
 		for(int n = 1; n < maxParticles; n++)
 		{
@@ -628,12 +713,12 @@ inline void updateInput()
 				p.resistance = 0;
 			}
 		}
-	}
+	}*/
 	
 	if(justPressed(UP_BUTTON))
 	{
 		previewParticle.type--; 
-		if(previewParticle.type >= numParticleTypes)
+		if(previewParticle.type < firstPreviewParticle)
 		{
 			previewParticle.type = numParticleTypes - 1;;
 		}
@@ -643,7 +728,7 @@ inline void updateInput()
 		previewParticle.type++; 
 		if(previewParticle.type >= numParticleTypes)
 		{
-			previewParticle.type = 0;
+			previewParticle.type = firstPreviewParticle;
 		}
 	}
 
